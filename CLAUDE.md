@@ -18,7 +18,7 @@ xcodebuild test -project Collectly.xcodeproj -scheme Collectly \
   -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build/DerivedData
 
 # Run with fake photos (Debug builds only; no permission prompt, in-memory storage)
-xcrun simctl launch booted com.collectly.Collectly -CollectlyDemoMode
+xcrun simctl launch booted com.ridge.collectly -CollectlyDemoMode
 ```
 
 Simulator names depend on the installed runtimes; check `xcrun simctl list devices available`. Don't pin `OS=` in the destination, because the patch versions vary.

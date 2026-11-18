@@ -54,7 +54,7 @@ open Collectly.xcodeproj
 ```
 
 Select the **Collectly** scheme and a simulator or device, then press Run.
-For a physical device, set your Team under *Signing & Capabilities*. You may also need to change the bundle identifier (`com.collectly.Collectly`).
+For a physical device, set your Team under *Signing & Capabilities*. You may also need to change the bundle identifier (`com.ridge.collectly`).
 
 ### Demo mode (no real photos needed)
 
@@ -68,7 +68,7 @@ xcodebuild build -project Collectly.xcodeproj -scheme Collectly \
   -destination 'platform=iOS Simulator,name=iPhone 17' -derivedDataPath build/DerivedData
 xcrun simctl boot "iPhone 17"
 xcrun simctl install booted build/DerivedData/Build/Products/Debug-iphonesimulator/Collectly.app
-xcrun simctl launch booted com.collectly.Collectly -CollectlyDemoMode
+xcrun simctl launch booted com.ridge.collectly -CollectlyDemoMode
 ```
 
 ## Testing
