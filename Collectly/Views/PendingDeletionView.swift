@@ -4,7 +4,11 @@ import SwiftUI
 /// iOS then asks again before moving them to Recently Deleted.
 struct PendingDeletionView: View {
     @Environment(AppModel.self) private var model
-    @State private var showingConfirmation = false
+    /// Photos shown when the user tapped Delete. Only these (if still
+    /// marked) are deleted, even if the list changes while the dialog is open.
+    @State private var deletionToConfirm: [String]?
+    /// Photos shown when the user tapped Keep All.
+    @State private var keepAllToConfirm: [String]?
 
     private let columns = [GridItem(.adaptive(minimum: 100), spacing: 8)]
     private var photoIDs: [String] { model.session.markedForDeletion }
@@ -37,6 +41,7 @@ struct PendingDeletionView: View {
                                         }
                                 }
                                 .buttonStyle(.plain)
+                                .disabled(model.isDeleting)
                                 .accessibilityLabel("Keep this photo instead")
                             }
                         }
@@ -49,38 +54,59 @@ struct PendingDeletionView: View {
             .toolbar {
                 if !photoIDs.isEmpty {
                     ToolbarItem(placement: .topBarTrailing) {
-                        Button("Keep All") { withAnimation { model.restoreAll() } }
+                        Button("Keep All") { keepAllToConfirm = photoIDs }
                             .disabled(model.isDeleting)
                     }
                 }
             }
-            .confirmationDialog(confirmationTitle, isPresented: $showingConfirmation, titleVisibility: .visible) {
-                Button(deleteTitle, role: .destructive) {
-                    Task { await model.confirmDeletion() }
+            .confirmationDialog(deleteQuestion(count: deletionToConfirm?.count ?? 0),
+                                isPresented: isPresenting($deletionToConfirm),
+                                titleVisibility: .visible,
+                                presenting: deletionToConfirm) { ids in
+                Button(deleteTitle(count: ids.count), role: .destructive) {
+                    Task { await model.confirmDeletion(of: ids) }
                 }
-            } message: {
-                Text("They'll move to Recently Deleted in the Photos app, where you can recover them for 30 days.")
+            } message: { _ in
+                Text("They'll move to Recently Deleted in the Photos app, where you can recover them for 30 days. If you use iCloud Photos, they're also removed from your other devices.")
+            }
+            .confirmationDialog(keepAllQuestion(count: keepAllToConfirm?.count ?? 0),
+                                isPresented: isPresenting($keepAllToConfirm),
+                                titleVisibility: .visible,
+                                presenting: keepAllToConfirm) { ids in
+                Button("Keep All") {
+                    withAnimation { model.restoreAll(ids) }
+                }
+            } message: { _ in
+                Text("They'll be marked as kept and removed from this list. Nothing is deleted.")
             }
         }
     }
 
-    private var deleteTitle: String {
-        photoIDs.count == 1 ? "Delete 1 Photo" : "Delete \(photoIDs.count) Photos"
+    private func isPresenting(_ ids: Binding<[String]?>) -> Binding<Bool> {
+        Binding(get: { ids.wrappedValue != nil }, set: { if !$0 { ids.wrappedValue = nil } })
     }
 
-    private var confirmationTitle: String {
-        photoIDs.count == 1 ? "Delete 1 photo?" : "Delete \(photoIDs.count) photos?"
+    private func deleteTitle(count: Int) -> String {
+        count == 1 ? "Delete 1 Photo" : "Delete \(count) Photos"
+    }
+
+    private func deleteQuestion(count: Int) -> String {
+        count == 1 ? "Delete 1 photo?" : "Delete \(count) photos?"
+    }
+
+    private func keepAllQuestion(count: Int) -> String {
+        count == 1 ? "Keep 1 photo?" : "Keep all \(count) photos?"
     }
 
     private var deleteButton: some View {
         Button(role: .destructive) {
-            showingConfirmation = true
+            deletionToConfirm = photoIDs
         } label: {
             Group {
                 if model.isDeleting {
                     ProgressView()
                 } else {
-                    Label(deleteTitle, systemImage: "trash")
+                    Label(deleteTitle(count: photoIDs.count), systemImage: "trash")
                 }
             }
             .frame(maxWidth: .infinity)

@@ -3,6 +3,7 @@ import SwiftUI
 struct AlbumsView: View {
     @Environment(AppModel.self) private var model
     @State private var showingNewAlbum = false
+    @State private var albumToDelete: Album?
 
     var body: some View {
         NavigationStack {
@@ -15,9 +16,8 @@ struct AlbumsView: View {
                             }
                         }
                         .onDelete { offsets in
-                            for album in offsets.map({ model.albums[$0] }) {
-                                model.deleteAlbum(album.id)
-                            }
+                            // Ask first, one album at a time.
+                            albumToDelete = offsets.first.map { model.albums[$0] }
                         }
                     } footer: {
                         Text("Deleting an album never deletes its photos.")
@@ -52,6 +52,17 @@ struct AlbumsView: View {
                 AlbumNameSheet(title: "New Album", actionTitle: "Create") { name in
                     try model.createAlbum(named: name)
                 }
+            }
+            .confirmationDialog("Delete “\(albumToDelete?.name ?? "")”?",
+                                isPresented: Binding(get: { albumToDelete != nil },
+                                                     set: { if !$0 { albumToDelete = nil } }),
+                                titleVisibility: .visible,
+                                presenting: albumToDelete) { album in
+                Button("Delete Album", role: .destructive) {
+                    model.deleteAlbum(album.id)
+                }
+            } message: { _ in
+                Text("The photos stay in your library.")
             }
         }
     }

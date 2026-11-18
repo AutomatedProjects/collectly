@@ -78,7 +78,7 @@ struct PermissionView: View {
     private var message: String {
         switch kind {
         case .request:
-            "Review your photos one at a time. Swipe right to keep, swipe left to mark for deletion, and file keepers into albums.\n\nNothing is deleted until you confirm, and your photos never leave your device."
+            "Review your photos one at a time. Swipe right to keep, swipe left to mark for deletion, and file keepers into albums.\n\nNothing is deleted until you confirm. Collectly has no account or servers and never uploads your photos. If you use iCloud Photos, iOS may download photos from iCloud to show them, and deleting a photo also removes it from your other devices."
         case .denied:
             "Collectly needs access to your photo library to help you sort it. You can turn on access in Settings › Privacy & Security › Photos."
         case .restricted:

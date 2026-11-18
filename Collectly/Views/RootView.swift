@@ -24,6 +24,8 @@ struct RootView: View {
             // Picks up permission or library changes made in Settings / Photos.
             if phase == .active {
                 Task { await model.refresh() }
+            } else if phase == .background {
+                model.flushPersistence()
             }
         }
         .alert("Something Went Wrong", isPresented: alertBinding) {

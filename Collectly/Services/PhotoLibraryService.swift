@@ -35,6 +35,15 @@ enum PhotoLibraryError: LocalizedError, Equatable {
     }
 }
 
+/// Outcome of a deletion request. Photos can be skipped because PhotoKit
+/// won't delete them (for example, photos synced from a computer) or because
+/// they are no longer in the library.
+struct PhotoDeletionResult: Equatable, Sendable {
+    var deleted: [String] = []
+    var notDeletable: [String] = []
+    var missing: [String] = []
+}
+
 /// Everything the app needs from the photo library. The real implementation
 /// wraps PhotoKit; `MockPhotoLibraryService` backs previews, tests, and demo mode.
 @MainActor
@@ -43,11 +52,15 @@ protocol PhotoLibraryService: AnyObject {
     func requestAuthorization() async -> PhotoLibraryAuthorization
     /// Identifiers of all visible still photos, newest first.
     func fetchPhotoIdentifiers() async -> [String]
-    /// `targetSize` is in pixels.
+    /// `targetSize` is in pixels. Cancelling the calling task cancels the
+    /// underlying request, including any iCloud download.
     func image(for photoID: String, targetSize: CGSize) async -> UIImage?
-    func creationDate(for photoID: String) -> Date?
-    /// Moves photos to the Photos app's Recently Deleted album. iOS shows its
-    /// own confirmation prompt; throws `PhotoLibraryError.userCancelled` if the
-    /// user declines it.
-    func deletePhotos(withIdentifiers photoIDs: [String]) async throws
+    func creationDate(for photoID: String) async -> Date?
+    /// Moves the deletable photos among `photoIDs` to the Photos app's
+    /// Recently Deleted album. iOS shows its own confirmation prompt; throws
+    /// `PhotoLibraryError.userCancelled` if the user declines it.
+    func deletePhotos(withIdentifiers photoIDs: [String]) async throws -> PhotoDeletionResult
+    /// Called on the main actor when the photo library changes, for example
+    /// after edits in the Photos app or a change to the limited selection.
+    var onLibraryChange: (@MainActor () -> Void)? { get set }
 }

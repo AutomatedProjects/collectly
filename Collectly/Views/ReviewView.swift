@@ -4,7 +4,9 @@ import UIKit
 /// The main swipe-to-review screen.
 struct ReviewView: View {
     @Environment(AppModel.self) private var model
-    @State private var showingAlbumPicker = false
+    /// The photo the album picker was opened for. Filing applies to this
+    /// photo only, even if the queue moves on while the sheet is open.
+    @State private var albumPickerPhoto: AlbumPickerTarget?
     @State private var showingResetConfirmation = false
 
     private var session: ReviewSession { model.session }
@@ -18,8 +20,8 @@ struct ReviewView: View {
                 ProgressHeader(progress: session.progress)
                 content
                     .frame(maxHeight: .infinity)
-                if session.current != nil {
-                    controls
+                if let current = session.current {
+                    controls(for: current)
                 }
             }
             .padding()
@@ -32,12 +34,12 @@ struct ReviewView: View {
                     } label: {
                         Label("Undo", systemImage: "arrow.uturn.backward")
                     }
-                    .disabled(!session.canUndo)
+                    .disabled(!session.canUndo || model.isCommittingSwipe)
                 }
             }
-            .sheet(isPresented: $showingAlbumPicker) {
-                AlbumPickerSheet(photoID: session.current) { albumID in
-                    withAnimation { model.keepCurrent(inAlbum: albumID) }
+            .sheet(item: $albumPickerPhoto) { target in
+                AlbumPickerSheet(photoID: target.photoID) { albumID in
+                    withAnimation { model.keep(target.photoID, inAlbum: albumID) }
                 }
             }
             .confirmationDialog("Review kept photos again?", isPresented: $showingResetConfirmation, titleVisibility: .visible) {
@@ -61,10 +63,8 @@ struct ReviewView: View {
                         .allowsHitTesting(false)
                         .accessibilityHidden(true)
                 }
-                SwipeCard(photoID: current) { decision in
-                    model.decide(decision)
-                }
-                .id(current)
+                SwipeCard(photoID: current)
+                    .id(current)
                 .transition(.opacity)
             }
         } else if session.progress.total == 0 {
@@ -84,19 +84,25 @@ struct ReviewView: View {
         }
     }
 
-    private var controls: some View {
+    private func controls(for photoID: String) -> some View {
         HStack(spacing: 28) {
             CircleButton(systemImage: "trash", tint: .red, label: "Delete") {
-                withAnimation { model.deleteCurrent() }
+                withAnimation { model.decide(.delete, for: photoID) }
             }
             CircleButton(systemImage: "rectangle.stack.badge.plus", tint: .accentColor, label: "Keep and Add to Album", size: 52) {
-                showingAlbumPicker = true
+                albumPickerPhoto = AlbumPickerTarget(photoID: photoID)
             }
             CircleButton(systemImage: "heart.fill", tint: .green, label: "Keep") {
-                withAnimation { model.keepCurrent() }
+                withAnimation { model.decide(.keep, for: photoID) }
             }
         }
+        .disabled(model.isCommittingSwipe)
     }
+}
+
+private struct AlbumPickerTarget: Identifiable {
+    let photoID: String
+    var id: String { photoID }
 }
 
 private struct CircleButton: View {
@@ -106,11 +112,13 @@ private struct CircleButton: View {
     var size: CGFloat = 64
     let action: () -> Void
 
+    @Environment(\.isEnabled) private var isEnabled
+
     var body: some View {
         Button(action: action) {
             Image(systemName: systemImage)
                 .font(.system(size: size * 0.38, weight: .semibold))
-                .foregroundStyle(tint)
+                .foregroundStyle(isEnabled ? tint : .secondary)
                 .frame(width: size, height: size)
                 .background(Circle().fill(Color(.secondarySystemBackground)))
                 .overlay(Circle().strokeBorder(tint.opacity(0.4), lineWidth: 2))
@@ -151,13 +159,14 @@ struct PhotoCard: View {
     let photoID: String
 
     @Environment(AppModel.self) private var model
+    @State private var creationDate: Date?
 
     var body: some View {
         GeometryReader { proxy in
             PhotoImageView(photoID: photoID, pointSize: proxy.size, contentMode: .fit)
                 .background(Color(.secondarySystemBackground))
                 .overlay(alignment: .bottomLeading) {
-                    if let date = model.library.creationDate(for: photoID) {
+                    if let date = creationDate {
                         Text(date, format: .dateTime.year().month().day())
                             .font(.caption.weight(.semibold))
                             .padding(.horizontal, 10)
@@ -169,16 +178,22 @@ struct PhotoCard: View {
                 .clipShape(RoundedRectangle(cornerRadius: 24))
                 .shadow(color: .black.opacity(0.15), radius: 8, y: 4)
         }
+        .task(id: photoID) {
+            creationDate = nil
+            let date = await model.library.creationDate(for: photoID)
+            guard !Task.isCancelled else { return }
+            creationDate = date
+        }
     }
 }
 
-/// Draggable card: right keeps, left marks for deletion.
+/// Draggable card: right keeps, left marks for deletion. The decision is
+/// bound to this card's photo, so it can't land on the next one.
 struct SwipeCard: View {
     let photoID: String
-    let onDecision: (ReviewDecision) -> Void
 
+    @Environment(AppModel.self) private var model
     @State private var offset: CGSize = .zero
-    @State private var isCommitting = false
 
     var body: some View {
         PhotoCard(photoID: photoID)
@@ -200,32 +215,32 @@ struct SwipeCard: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Photo")
             .accessibilityHint("Swipe right to keep, left to mark for deletion.")
-            .accessibilityAction(named: "Keep") { onDecision(.keep) }
-            .accessibilityAction(named: "Mark for Deletion") { onDecision(.delete) }
+            .accessibilityAction(named: "Keep") { model.decide(.keep, for: photoID) }
+            .accessibilityAction(named: "Mark for Deletion") { model.decide(.delete, for: photoID) }
     }
 
     private var dragGesture: some Gesture {
         DragGesture()
             .onChanged { value in
-                guard !isCommitting else { return }
+                guard !model.isCommittingSwipe else { return }
                 offset = value.translation
             }
             .onEnded { value in
-                guard !isCommitting else { return }
+                guard !model.isCommittingSwipe else { return }
                 let decision = SwipeDecider.decision(translation: value.translation.width,
                                                      predictedEndTranslation: value.predictedEndTranslation.width)
-                guard let decision else {
+                guard let decision, model.beginSwipe(on: photoID) else {
                     withAnimation(.spring(response: 0.35, dampingFraction: 0.7)) { offset = .zero }
                     return
                 }
-                isCommitting = true
                 UIImpactFeedbackGenerator(style: .medium).impactOccurred()
                 withAnimation(.easeIn(duration: 0.2)) {
                     offset.width = decision == .keep ? 700 : -700
                 }
+                let (model, photoID) = (model, photoID)
                 Task {
                     try? await Task.sleep(for: .milliseconds(200))
-                    onDecision(decision)
+                    withAnimation { model.finishSwipe(decision, on: photoID) }
                 }
             }
     }

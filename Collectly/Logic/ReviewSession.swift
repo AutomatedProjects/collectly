@@ -6,17 +6,33 @@ import Foundation
 /// Decisions for photos that are not currently visible (for example, photos
 /// deselected under limited library access) are retained so they come back if
 /// the photo becomes visible again, but they are excluded from progress.
+/// Delete marks are the exception: see `pruneStaleDeleteMarks`.
 struct ReviewSession: Sendable {
     static let undoLimit = 100
+    /// How long a delete mark survives while its photo is hidden (limited
+    /// access). Expiring a mark only returns the photo to review; it never
+    /// deletes anything.
+    static let hiddenDeleteMarkLifetime: TimeInterval = 30 * 24 * 60 * 60
 
     struct UndoEntry: Equatable, Sendable {
         let photoID: String
         let decision: ReviewDecision
+        /// The album this decision filed the photo into, if it was a
+        /// "keep in album". Undo removes the photo from that album again.
+        let filedAlbumID: UUID?
+
+        init(photoID: String, decision: ReviewDecision, filedAlbumID: UUID? = nil) {
+            self.photoID = photoID
+            self.decision = decision
+            self.filedAlbumID = filedAlbumID
+        }
     }
 
     /// Photos visible in the library, in review order (newest first).
     private(set) var libraryIDs: [String] = []
     private(set) var decisions: [String: ReviewDecision]
+    /// When each photo was marked for deletion.
+    private(set) var deleteMarkedAt: [String: Date]
     /// Unreviewed photos; the first element is the photo currently on screen.
     private(set) var queue: [String] = []
     private(set) var undoStack: [UndoEntry] = []
@@ -26,8 +42,16 @@ struct ReviewSession: Sendable {
 
     private var librarySet: Set<String> = []
 
-    init(libraryIDs: [String] = [], decisions: [String: ReviewDecision] = [:]) {
+    init(libraryIDs: [String] = [],
+         decisions: [String: ReviewDecision] = [:],
+         deleteMarkedAt: [String: Date] = [:],
+         now: Date = Date()) {
         self.decisions = decisions
+        var markedAt: [String: Date] = [:]
+        for (id, decision) in decisions where decision == .delete {
+            markedAt[id] = deleteMarkedAt[id] ?? now
+        }
+        self.deleteMarkedAt = markedAt
         reconcile(with: libraryIDs)
     }
 
@@ -47,19 +71,53 @@ struct ReviewSession: Sendable {
         recount()
     }
 
+    /// Drops delete marks for photos that are not visible, so a forgotten mark
+    /// can't resurface later and be deleted in a batch. With full library
+    /// access a missing photo is gone (or hidden in Photos), so its mark is
+    /// dropped right away. With limited access the photo may just be
+    /// deselected, so its mark is kept for `hiddenDeleteMarkLifetime`.
+    /// Dropping a mark sends the photo back to review; it never deletes.
+    /// Returns the photos whose marks were dropped.
+    @discardableResult
+    mutating func pruneStaleDeleteMarks(libraryIsComplete: Bool, now: Date = Date()) -> [String] {
+        let stale = deleteMarkedAt.compactMap { id, markedAt -> String? in
+            guard !librarySet.contains(id) else { return nil }
+            return libraryIsComplete || now.timeIntervalSince(markedAt) > Self.hiddenDeleteMarkLifetime ? id : nil
+        }
+        for id in stale {
+            decisions[id] = nil
+            deleteMarkedAt[id] = nil
+        }
+        recount()
+        return stale.sorted()
+    }
+
     /// Records a decision for the current photo and advances the queue.
     /// Returns the photo that was decided, or `nil` if nothing is left.
     @discardableResult
-    mutating func decide(_ decision: ReviewDecision) -> String? {
+    mutating func decide(_ decision: ReviewDecision, now: Date = Date()) -> String? {
         guard let id = queue.first else { return nil }
+        return decide(decision, for: id, now: now) ? id : nil
+    }
+
+    /// Records a decision for `photoID`, but only if it is still the photo on
+    /// screen. Guards against a decision landing on a different photo than
+    /// the one the user acted on (for example after a delayed swipe).
+    @discardableResult
+    mutating func decide(_ decision: ReviewDecision,
+                         for photoID: String,
+                         filedIn albumID: UUID? = nil,
+                         now: Date = Date()) -> Bool {
+        guard queue.first == photoID else { return false }
         queue.removeFirst()
-        decisions[id] = decision
-        undoStack.append(UndoEntry(photoID: id, decision: decision))
+        decisions[photoID] = decision
+        deleteMarkedAt[photoID] = decision == .delete ? now : nil
+        undoStack.append(UndoEntry(photoID: photoID, decision: decision, filedAlbumID: albumID))
         if undoStack.count > Self.undoLimit {
             undoStack.removeFirst(undoStack.count - Self.undoLimit)
         }
         recount()
-        return id
+        return true
     }
 
     /// Reverts the most recent decision and puts that photo back on screen.
@@ -69,6 +127,7 @@ struct ReviewSession: Sendable {
         while let entry = undoStack.popLast() {
             guard decisions[entry.photoID] == entry.decision, librarySet.contains(entry.photoID) else { continue }
             decisions[entry.photoID] = nil
+            deleteMarkedAt[entry.photoID] = nil
             queue.insert(entry.photoID, at: 0)
             recount()
             return entry
@@ -80,12 +139,17 @@ struct ReviewSession: Sendable {
     mutating func restore(_ photoID: String) {
         guard decisions[photoID] == .delete else { return }
         decisions[photoID] = .keep
+        deleteMarkedAt[photoID] = nil
         recount()
     }
 
-    mutating func restoreAll() {
-        for id in markedForDeletion {
+    /// Keeps every photo in `photoIDs` that is still marked for deletion.
+    /// Photos marked after the caller captured `photoIDs` stay marked.
+    mutating func restoreAll(_ photoIDs: [String]) {
+        let marked = Set(markedForDeletion)
+        for id in photoIDs where marked.contains(id) {
             decisions[id] = .keep
+            deleteMarkedAt[id] = nil
         }
         recount()
     }
@@ -95,6 +159,7 @@ struct ReviewSession: Sendable {
         let removed = Set(ids)
         for id in removed {
             decisions[id] = nil
+            deleteMarkedAt[id] = nil
         }
         reconcile(with: libraryIDs.filter { !removed.contains($0) })
     }

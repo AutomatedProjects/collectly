@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import Collectly
 
@@ -89,7 +90,7 @@ struct ReviewSessionTests {
         session.restore("c") // unreviewed: no-op
         #expect(session.decisions["c"] == nil)
 
-        session.restoreAll()
+        session.restoreAll(session.markedForDeletion)
         #expect(session.markedForDeletion.isEmpty)
         #expect(session.progress.kept == 2)
     }
@@ -133,5 +134,106 @@ struct ReviewSessionTests {
         #expect(session.queue == ["a", "c", "d"])
         #expect(session.markedForDeletion == ["b"])
         #expect(session.undoStack.map(\.photoID) == ["b"])
+    }
+
+    // MARK: Decisions bound to a photo (M1, L2)
+
+    @Test func decisionForAPhotoThatIsNoLongerCurrentIsRejected() {
+        var session = ReviewSession(libraryIDs: ids)
+        let first = session.decide(.delete, for: "a")
+        // A delayed decision for "a" must not land on "b".
+        let late = session.decide(.delete, for: "a")
+        let notCurrent = session.decide(.keep, for: "c")
+        #expect(first && !late && !notCurrent)
+        #expect(session.current == "b")
+        #expect(session.decisions == ["a": .delete])
+        #expect(session.undoStack.count == 1)
+    }
+
+    @Test func undoEntryCarriesTheAlbumFiling() {
+        var session = ReviewSession(libraryIDs: ids)
+        let albumID = UUID()
+        session.decide(.keep, for: "a", filedIn: albumID)
+        session.decide(.keep, for: "b")
+        #expect(session.undo()?.filedAlbumID == nil)
+        #expect(session.undo() == .init(photoID: "a", decision: .keep, filedAlbumID: albumID))
+    }
+
+    @Test func resetDropsFilingsWithTheirUndoEntries() {
+        var session = ReviewSession(libraryIDs: ids)
+        session.decide(.keep, for: "a", filedIn: UUID())
+        session.resetKept()
+        session.decide(.keep, for: "a") // re-kept without filing
+        #expect(session.undo()?.filedAlbumID == nil)
+        #expect(session.undo() == nil)
+    }
+
+    // MARK: Keep All snapshot (L7)
+
+    @Test func restoreAllOnlyKeepsTheGivenPhotos() {
+        var session = ReviewSession(libraryIDs: ids)
+        session.decide(.delete) // a
+        let snapshot = session.markedForDeletion
+        session.decide(.delete) // b, marked after the snapshot
+        session.restoreAll(snapshot + ["c"]) // "c" isn't marked: ignored
+        #expect(session.decisions == ["a": .keep, "b": .delete])
+        #expect(session.markedForDeletion == ["b"])
+    }
+
+    // MARK: Delete-mark retention (L3)
+
+    @Test func deleteMarkDatesFollowTheDecision() {
+        let now = Date(timeIntervalSince1970: 1_000)
+        var session = ReviewSession(libraryIDs: ids)
+        session.decide(.delete, now: now) // a
+        session.decide(.delete, now: now) // b
+        session.decide(.delete, now: now) // c
+        #expect(session.deleteMarkedAt == ["a": now, "b": now, "c": now])
+        session.undo()
+        session.restore("b")
+        session.removeDeleted(["a"])
+        #expect(session.deleteMarkedAt.isEmpty)
+    }
+
+    @Test func legacyDeleteMarksWithoutDatesGetOne() {
+        let now = Date(timeIntervalSince1970: 5_000)
+        let session = ReviewSession(decisions: ["a": .delete, "b": .keep], deleteMarkedAt: ["b": .distantPast], now: now)
+        #expect(session.deleteMarkedAt == ["a": now])
+    }
+
+    @Test func completeLibraryDropsDeleteMarksForMissingPhotosOnly() {
+        var session = ReviewSession(libraryIDs: ids)
+        session.decide(.delete) // a
+        session.decide(.keep)   // b
+        session.decide(.delete) // c
+        session.reconcile(with: ["c", "d"]) // a and b are gone
+
+        let dropped = session.pruneStaleDeleteMarks(libraryIsComplete: true)
+        #expect(dropped == ["a"])
+        #expect(session.decisions == ["b": .keep, "c": .delete])
+        #expect(session.markedForDeletion == ["c"])
+    }
+
+    @Test func limitedLibraryExpiresHiddenDeleteMarksAfterTheLifetime() {
+        let markedAt = Date(timeIntervalSince1970: 0)
+        var session = ReviewSession(libraryIDs: ids)
+        session.decide(.delete, now: markedAt) // a
+        session.decide(.delete, now: markedAt) // b
+        session.reconcile(with: ["b", "c", "d"]) // a deselected under limited access
+
+        let early = markedAt.addingTimeInterval(ReviewSession.hiddenDeleteMarkLifetime - 1)
+        #expect(session.pruneStaleDeleteMarks(libraryIsComplete: false, now: early).isEmpty)
+        #expect(session.decisions["a"] == .delete)
+
+        let late = markedAt.addingTimeInterval(ReviewSession.hiddenDeleteMarkLifetime + 1)
+        #expect(session.pruneStaleDeleteMarks(libraryIsComplete: false, now: late) == ["a"])
+        #expect(session.decisions["a"] == nil)
+        // Visible marks never expire: they are always shown in To Delete.
+        #expect(session.decisions["b"] == .delete)
+
+        // If "a" becomes visible again it is back in review, not in To Delete.
+        session.reconcile(with: ids)
+        #expect(session.queue.contains("a"))
+        #expect(session.markedForDeletion == ["b"])
     }
 }
